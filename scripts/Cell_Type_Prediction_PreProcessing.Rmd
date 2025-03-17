@@ -1,0 +1,735 @@
+---
+title: "Cell Type Prediction Test"
+author: "Kendrix"
+date: "8/3/2020"
+output: 
+  html_document:
+      highlight: pygments
+      theme: united
+      toc: true
+      toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Aim: To test the viability of cell type prediction of cord blood tissues. 
+
+---------------------------------------------------------------------------------------------------------------------------
+
+```{r, echo=TRUE, results='hide', warning=FALSE, message=FALSE}
+library(GEOquery)
+library(RCurl)
+library(GEOmetadb)
+library(dendextend)
+library(ArrayExpress)
+library(methylumi)
+library(lumi)
+library(lattice)
+library(gplots)
+library(RColorBrewer)
+library(limma)
+library(ROC)
+library(matrixStats)
+library(reshape)
+library(sva)
+library(grid)
+library(gridExtra)
+library(ape)
+library(Hmisc)
+library(RCurl)
+library(wateRmelon)
+library(minfiData)
+library(minfi)
+library(robustHD)
+library(ewastools)
+library(omicsPrint)
+library(doParallel)
+library(jcolors)
+library(plyr)
+library(tidyverse)
+library(ggrepel)
+library(ggpubr)
+library(IlluminaHumanMethylationEPICanno.ilm10b2.hg19)
+library(IlluminaHumanMethylationEPICmanifest)
+library(Biobase)
+library(data.table)
+library(factoextra)
+library(Metrics)
+library(quantro)
+
+setwd("~/KoborLab/kobor_space/kendrix/Cell_Type_Prediction/")
+```
+
+---------------------------------------------------------------------------------------------------------------------------
+
+##Data exploration and object creation
+
+
+###Step 1: Download data from GEO and explore. 
+
+GEO Accession number: GSE152380
+
+The data used here is published in the International Journal of Molecular Sciences titled [Epigenome Wide Association and Stochastic Epigenetic Mutation Analysis on Cord Blood of Preterm Birth](https://www.mdpi.com/1422-0067/21/14/5044/htm) by Spada et al (2020). They seek to evaluate the epigenetic impact of preterm birth on DNA methylation, and show significant differences in blood cell composition between the two groups. 
+
+Array used: Illumina 450K
+
+Sample size: 90 (18 preterm newborn (**Case**); 72 full term newborns (**Control**))
+
+Tissue: Cord blood
+
+Sex: Male - 44; Female - 46
+
+```{r}
+#Download data from GEO and extract pData.
+GSE152380 <- getGEO("GSE152380", GSEMatrix = TRUE)
+show(GSE152380)
+
+#Extract pData and clean up.
+GSE152380_pData <- pData(GSE152380[[1]])
+dim(GSE152380_pData)
+
+#Change column names.
+colnames(GSE152380_pData)[1] <- "Sample_Title"
+colnames(GSE152380_pData)[2] <- "Sample_Name"
+colnames(GSE152380_pData)[8] <- "Sample_Group"
+colnames(GSE152380_pData)[10] <- "Tissue"
+colnames(GSE152380_pData)[11] <- "Sex"
+
+#Clean up columns.
+GSE152380_pData$Tissue <- gsub("tissue: ", "", GSE152380_pData$Tissue)
+GSE152380_pData$Sex <- gsub("Sex: ", "", gsub("male", "M", gsub("female", "F", GSE152380_pData$Sex)))
+```
+
+```{r}
+#Create samplesheet.
+GSE152380_samplesheet <- GSE152380_pData[, c("Sample_Title", "Sample_Name", "Sample_Group", "supplementary_file", "Tissue", "Sex")]
+
+#Prepare to check with idats. 
+GSE152380_suppl_idats.check <- GSE152380_samplesheet$supplementary_file
+GSE152380_suppl_idats.check <- gsub(".*/", "", gsub("_Grn.idat.gz", "", GSE152380_suppl_idats.check))
+
+#Prepare samplesheet.
+GSE152380_samplesheet$supplementary_file <- gsub(".*/", "", GSE152380_samplesheet$supplementary_file)
+GSE152380_samplesheet$supplementary_file <- gsub("[^_]*_(.*)", "\\1", GSE152380_samplesheet$supplementary_file) #Remove any character string BEFORE the first _.
+GSE152380_samplesheet$supplementary_file <- gsub("_Grn.idat.gz", "", GSE152380_samplesheet$supplementary_file) 
+
+#Split supplementary_file column into Sentrix_ID and Sentrix_Position columns as suggested by Illumina.
+GSE152380_samplesheet <- GSE152380_samplesheet %>% separate(supplementary_file, c("Sentrix_ID", "Sentrix_Position"), "_")
+```
+
+```{r, eval=FALSE}
+#Save samplesheet.
+write.csv(GSE152380_samplesheet, file = "~/KoborLab/kobor_space/kendrix/Cell_Type_Prediction/idats/GSE152380/GSE152380_samplesheet.csv", row.names = FALSE)
+```
+
+
+```{r, eval=FALSE}
+#Download idats in the supplementary folder from GEO.
+GSE152380_raw_path <- getGEOSuppFiles("GSE152380", fetch_files = TRUE,
+                                       baseDir = "~/KoborLab/kobor_space/kendrix/Cell_Type_Prediction/idats")
+untar("~/KoborLab/kobor_space/kendrix/Cell_Type_Prediction/idats/GSE152380/GSE152380_RAW.tar",
+       exdir = "/home/BCRICWH.LAN/kendrix.kek/KoborLab/kobor_space/kendrix/Cell_Type_Prediction/idats/GSE152380")
+file.remove("~/KoborLab/kobor_space/kendrix/Cell_Type_Prediction/idats/GSE152380/GSE152380_RAW.tar")
+head(list.files("~/KoborLab/kobor_space/kendrix/Cell_Type_Prediction/idats/GSE152380", pattern = "idat"))
+idatFiles <- list.files("~/KoborLab/kobor_space/kendrix/Cell_Type_Prediction/idats/GSE152380", pattern = "idat.gz$", full = TRUE)
+sapply(idatFiles, gunzip, overwrite = TRUE)
+
+#Check if all idats are in the samplesheet. 
+idatFiles.check <- gsub("/home/BCRICWH.LAN/kendrix.kek/KoborLab/kobor_space/kendrix/Cell_Type_Prediction/idats/GSE152380/", "", gsub("_Grn.idat.gz", "", gsub("_Red.idat.gz", "", idatFiles)))
+idatFiles.check <- unique(idatFiles.check)
+
+all(GSE152380_suppl_idats.check == idatFiles.check) #TRUE.
+```
+
+
+###Step 2: Create ExtendedRGSet object.
+
+```{r, results='hide', message=FALSE}
+path = "~/KoborLab/kobor_space/kendrix/Cell_Type_Prediction/idats/GSE152380"
+targets <- read.metharray.sheet(path) #Tells R to look for sample sheet within the folder. 
+baseDir <- system.file(path, package = "minfiData") 
+baseDir #baseDir determines the array chip position and ID.
+sub(baseDir, "", targets$Basename) #The class of RGSet is an RGChannelSet object. This is the initial object of a minfi analysis that contains the raw intensities in the green and red channels. Note that this object contains the intensities of the internal control probes as well. 
+
+#Create RGSet object.
+GSE152380_ExtendedRGSet <- read.metharray.exp(targets = targets, extended = TRUE, verbose = TRUE)
+head(pData(GSE152380_ExtendedRGSet))
+```
+
+```{r}
+sampleNames(GSE152380_ExtendedRGSet) == paste0(GSE152380_samplesheet$Sample_Name, "_", GSE152380_samplesheet$Sentrix_ID, "_", GSE152380_samplesheet$Sentrix_Position) #Check order of sampleNames in RGSet and samplesheet to change sampleNames in RGSet. Proceed ONLY if all is TRUE. 
+sampleNames(GSE152380_ExtendedRGSet) <- GSE152380_samplesheet$Sample_Name #Change sampleNames of GSE152380_ExtendedRGSet.
+identical(sampleNames(GSE152380_ExtendedRGSet), rownames(pData(GSE152380_ExtendedRGSet))) #Confirm sample orders in pData.
+identical(sampleNames(GSE152380_ExtendedRGSet), colnames(getBeta(GSE152380_ExtendedRGSet))) #Confirm sample orders in beta matrix. 
+```
+
+```{r, eval=FALSE}
+save(GSE152380_ExtendedRGSet, file = "~/KoborLab/kobor_space/kendrix/Cell_Type_Prediction/GSE152380_ExtendedRGSet.RData")
+```
+
+
+###Step 3: Create ewastools object. 
+
+```{r}
+#Create ewastools sampleInfo sheet.
+GSE152380_sampleInfo <- GSE152380_pData[, c("Sample_Title", "Sample_Name", "Sample_Group", "supplementary_file", "Tissue", "Sex")]
+
+colnames(GSE152380_sampleInfo)[4] <- "Assay_Name"
+GSE152380_sampleInfo$Assay_Name <- gsub(".*/", "", gsub("_Grn.idat.gz", "", GSE152380_sampleInfo$Assay_Name))
+
+path <- "/home/BCRICWH.LAN/kendrix.kek/KoborLab/kobor_space/kendrix/Cell_Type_Prediction/idats/GSE152380/"
+GSE152380_sampleInfo$Assay_Name <- paste0(path, GSE152380_sampleInfo$Assay_Name)
+GSE152380_meth <- read_idats(GSE152380_sampleInfo$Assay_Name, quiet = TRUE)
+GSE152380_meth$meta$sample_id <- gsub("_.*", "", GSE152380_meth$meta$sample_id)
+
+all(GSE152380_meth$meta$sample_id == sampleNames(GSE152380_ExtendedRGSet)) #Sample order matches between RGSet and ewastools object. Needs to be TRUE.
+all(GSE152380_meth$meta$sample_id == GSE152380_sampleInfo$Sample_Name) #Sample order matches between ewastools object and samplesheet. Needs to be TRUE.
+```
+
+---------------------------------------------------------------------------------------------------------------------------
+
+##Quality Control
+
+
+###Step 1: Control metrics.
+
+Quality control metrics are examined to determine the success of the bisulphite conversion and subsequent array hybridisation. This check uses the Illumina’s 636 control probes to assess technical parameters including array staining, extension, hybridization, target removal, specificity, and bisulfite conversion.
+
+NOTE: GSM4613801 and GSM4613813 FAILED. 
+
+```{r}
+ctrls <- control_metrics(GSE152380_meth)
+#A logical vector of passed/failed is returned by sample_failure() which compares all 17 metrics against the thresholds recommended by Illumina.
+
+GSE152380_sampleInfo$failed <- as.data.frame(sample_failure(ctrls))
+table(GSE152380_sampleInfo$failed) #If GSE152380_sampleInfo$failed == FALSE, all samples PASS.
+
+failed_control_metrics <- GSE152380_sampleInfo[GSE152380_sampleInfo$failed == TRUE, "Sample_Name"] #Check the sample names for the ones that fail control metrics.
+failed_control_metrics #No failed samples. 
+
+#Summary of control metrics.
+control_metrics_all <- as.data.frame(ctrls)
+control_metrics_all$Sample_Name <- GSE152380_sampleInfo$Sample_Name
+head(control_metrics_all)
+sapply(control_metrics_all, function(x) sum(is.na(x)))
+```
+
+```{r, fig.align='center'}
+stripchart(ctrls$`Bisulfite Conversion II`, method = "jitter", pch = 4, xlab = 'Bisulfite Conversion II', xlim = c(0,20)) + 
+  abline(v = 1, col = 2, lty = 3) +
+  text(ctrls$`Bisulfite Conversion II`[ctrls$`Bisulfite Conversion II` < 1], 1.2, labels = ctrls$Sample_Name[ctrls$`Bisulfite Conversion II` < 1], srt = 45)
+```
+
+or
+
+```{r, fig.align='center'}
+controlStripPlot(GSE152380_ExtendedRGSet, controls = c("BISULFITE CONVERSION I", "BISULFITE CONVERSION II"))
+```
+
+
+###Step 2: Detection p-value.
+
+It is worth checking the quality of the samples to see if they are true signals and are not conflated with background noise. One way to do so is by determining the detection p-values of the samples to parse out true methylation signals. Detection p-values by definition are measures that differentiate sample signal from background noise (which is estimated using the negative probes of the array). By default, the threshold for significant detection p-value is set at 0.01. Samples that are above the p-value threshold are considered statistically poor and should be removed.
+
+The minfi package provides a function, detectionP() to determine detection p-values for each methylation region across samples. After determining the detection p-values, I plot the mean detection p-value for each sample to gauge the general quality of the samples in terms of overall signal reliability. From the plot, there are several samples shown that fail detection p-value check (detection p-value > 0.01).
+
+NOTE: All samples PASSED. 
+
+```{r, fig.align='center'}
+detp_ori <- minfi::detectionP(GSE152380_ExtendedRGSet) #Detection p-value distinguishes signal from background noise with a single cut-off.
+head(detp_ori)[,1:5]
+
+#Examine mean detection p-values across all samples to identify any failed samples.
+plot(colMeans(detp_ori), ylim = c(0.00002, 0.1), xaxt = 'n', ann = FALSE, pch = 20, col = "black", cex = 1) + 
+  mtext(side = 1, line = 0.5, "Samples", font = 1, cex = 1) + 
+  mtext(side = 2, line = 2, "Mean detection p-values", font = 1, cex = 1) + 
+  abline(h = 0.01, col = "red") + 
+  text(colMeans(detp_ori), labels = GSE152380_ExtendedRGSet$Sample_Name, cex = 0.5, font = 2, pos = 2)
+```
+
+
+###Step 3: Beadcount.
+
+For each probe sequence in the 450K array, a median of 14 beads is randomly distributed on the array. Each of these beads contains hundreds of thousands of oligonucleotides. This provides a unique set of internal technical replication on each array. This step is done to remove probes that are not represented by a minimum of 3 beads on the array, which is important to correct for positional effects (i.e. the effects where the same sample in different physical positions on the array could be measured as different methylation levels).
+
+NOTE: All samples PASSED. 
+
+```{r, fig.align='center'}
+#Calculate the number of samples with bead count <3 for each probe in a matrix of bead count values
+bead <- beadcount(GSE152380_ExtendedRGSet)
+colnames(bead) <- gsub('X', '', colnames(bead))
+
+GSE152380_samplesheet <- GSE152380_samplesheet %>% mutate(Beadcount = colSums(is.na(bead)))
+
+GSE152380_samplesheet %>% 
+  mutate(Sample_Name = factor(as.character(Sample_Name), levels = Sample_Name)) %>%
+  ggplot(aes(x = Sample_Name, y = Beadcount)) +
+  geom_point(alpha = 0.7, color = 'black') + 
+  geom_hline(yintercept = 0.01*nrow(bead), linetype = 'dashed', color = 'green') +
+  geom_text(aes(x = 0, y = 0.01*nrow(bead)), 
+            label = '1%', vjust = -0.5, hjust = -0.5, color = 'green')+
+  scale_y_continuous(limits = c(0, 12500), breaks = seq(0, 12500, 2500)) +
+  labs(x = 'Samples', y = '', title = 'Number of samples with bead count < 3 in their probes') +
+  theme_classic() +
+  theme(axis.text.x = element_blank()) 
+```
+
+
+###Step 4: Log median intensity of methylated and unmethylated channels.
+
+minfi package provides a simple quality control plot that uses the log median intensity in both the methylated (M) and unmethylated (U) channels. When plotting these two medians against each other, it has been observed that good samples cluster together, while failed samples tend to separate and have lower median intensities.
+
+NOTE: GSM4613801 and GSM4613813 FAILED.
+
+```{r, fig.align='center'}
+GSE152380_MSet <- preprocessRaw(GSE152380_ExtendedRGSet) #Get MSet object from RGSet.
+head(getMeth(GSE152380_MSet)[,1:3])
+head(getUnmeth(GSE152380_MSet)[,1:3])
+
+GSE152380_QC <- getQC(GSE152380_MSet)
+head(GSE152380_QC)
+plotQC(GSE152380_QC)
+```
+
+
+###Step 5: Contamination check.
+
+The 450K BeadChip also features 65 control probes which assay highly-polymorphic single nucleotide polymorphisms (SNPs) rather than DNA methylation. These are included on the array to allow sample quality control to check for relatedness between individuals and enable the detection of potential sample mix-ups. The signal from these probes is expected to cluster into three distinct groups (representing the heterozygous and two homozygous groups). Although these are not DNA methylation signals, they could be used to provide an indication of the degree of technical variance between samples.
+
+NOTE: GSM4613801 and GSM4613813 have 0.3 probability of being outliers. 
+
+```{r, fig.align='center'}
+#While ewastools implements the LOESS normalization (Heiss and Brenner, 2015), the developers of the package says not use the normalization "as it does little to protect against batch effects but can result in the removal of genuine biological signal". They recommend to adjust for relevant technical covariates in regression models later.
+
+beta <- dont_normalize(GSE152380_meth)
+
+#Pulling SNP probes.
+snps <- GSE152380_meth$manifest[probe_type == "rs", index]
+snps <- beta[snps,]
+
+#These SNPs are then used as input for call_genotypes(). This function estimates the parameters of a mixed model consisting of three beta distributions representing one heterozygous and the two homozygous genotypes. There is also a fourth component, shown as a uniform distribution that represents outliers. The functions returns posterior probabilities used for soft classification. 
+#In simple words, we are determining the probability for every SNP whether they belong to 1 of 4 different distributions - 3 of which correspond to the 3 expected genotypes (AA, AB, BB), and the 4th distribution corresponds to outside/in-between these expected genotype distributions. SNPs with a higher probability of belonging to this 4th distribution indicate mixing between more than one genotype.
+
+genotypes_called <- call_genotypes(snps, learn = T)
+
+#Fit mixed model to call genotypes.
+snps_called <- call_genotypes(snps, learn = T)
+
+#Call genotype clusters.
+GSE152380_samplesheet <- GSE152380_samplesheet %>% 
+  mutate(genotype_cluster = as.factor(enumerate_sample_donors(genotypes_called)))
+
+#Examine probability outlier.
+plot(snp_outliers(genotypes_called) %>% sort, ylab = "SNP Outliers")
+
+#Overall distribution of the genotypes.
+ewastools:::mxm_(genotypes_called)
+```
+
+We see 3 peaks, corresponding to 3 possible genotypes.
+
+```{r, fig.align='center'}
+#Check the average probability of SNP not belonging to any of the 3 genotypes (coloured by Sex).
+GSE152380_samplesheet <- GSE152380_samplesheet %>% 
+  mutate(Prob_SNP_outlier = colMeans(genotypes_called$outliers, na.rm = T),
+         Prob_SNP_outlier_Logodds = snp_outliers(genotypes_called))
+  
+  ggplot(GSE152380_samplesheet, aes(x = Sample_Name, y = Prob_SNP_outlier, fill = Sex)) +
+  geom_point(shape = 21, size = 2.5, alpha = 0.8, col="black") + 
+    geom_label_repel(data = subset(GSE152380_samplesheet, Prob_SNP_outlier > 0.2),
+            aes(label = Sample_Name)) +
+  scale_fill_manual(values=c("#bd7b9f", "#2c7dab")) +
+  labs(x = 'Samples', y = "Probability", 
+       title = 'Average probability of SNP being an outlier') +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 14),
+        axis.text.y = element_text(size = 14),
+        axis.title.x = element_text(size = 15, vjust = -0.3),
+        axis.title.y = element_text(size = 15, vjust = 2),
+        legend.position = "none") +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.1)) +
+  scale_x_discrete(breaks = NULL, expand = c(0.02, 0.02))
+```
+
+```{r, fig.align='center'}
+#Look at the raw distribution
+snp_betas <- getSnpBeta(GSE152380_ExtendedRGSet)
+snp_betas_melt <- t(snp_betas) %>% as_tibble %>% mutate(Sample_Name = colnames(snp_betas)) %>%
+  left_join(GSE152380_samplesheet %>% select(Sample_Name, Sex), by = 'Sample_Name') %>%
+  gather(key = 'SNP', value = 'Beta', -Sample_Name, -Sex)
+
+ggplot(snp_betas_melt, aes(x = SNP, y = Beta, fill = Sex)) +
+  geom_point(shape = 21, size = 2.5, alpha = 0.8, col = "black") + 
+  scale_fill_manual(values = c("#bd7b9f", "#2c7dab")) +
+  labs(x = '59 SNPs') + theme_bw() + theme(axis.text.x = element_blank()) +
+  theme_bw() +
+  theme(axis.text.x = element_blank()) +
+  scale_x_discrete(breaks = NULL, expand = c(0.02, 0.02))
+```
+
+
+###Step 6: Data linkage errors and Sample relations detection.
+
+omicsPrint (Van Iterson et al. 2018) is a package developed to detect data linkage errors through inspecting sample relations in multiple omics studies. Included with the package is the hm450.manifest.pop.GoNL data, which stores SNP probe information in a GRanges class object. This is then used to create a subset of the beta values for genotyping. The function beta2genotype() then genotypes the observations by measuring homozygous or heterozygous alleles at these SNP probes. Lastly alleleSharing() assesses the relationships between different individuals, which can be unrelated, twins, or identical. The results can then be visualised using the inferRelations() function. In the data with sample relationships, this would be shown in the above graph as green or black clusters (Van Iterson et al. 2018). It is important to carry out this type of visualization before probe-filtering as otherwise the genotyping will be based on very few SNPs.
+
+NOTE: All samples are unrelated. 
+
+```{r, fig.align='center'}
+data(hm450.manifest.pop.GoNL)
+
+betas <- getBeta(GSE152380_ExtendedRGSet)
+
+cpgs <- names(hm450.manifest.pop.GoNL[mcols(hm450.manifest.pop.GoNL)$MASK.snp5.EAS])
+cpgs <- na.omit(match(cpgs, rownames(betas)))
+omicsBetas <- betas[cpgs,]
+omicsBetas[1:10, 1:2]
+
+dnamCalls <- beta2genotype(omicsBetas, assayName = "exprs")
+dim(dnamCalls)
+dnamCalls[1:10, 1:2]
+
+omicsData <- alleleSharing(dnamCalls, verbose = TRUE)
+mismatches <- inferRelations(omicsData)
+```
+
+
+###Step 7: Sample identity. 
+
+Hierarchical clustergram across all samples cluster similar samples together while samples that are different from all the other samples are pulled down as outliers. 
+
+NOTE: No outliers detected. 
+
+```{r, fig.align='center'}
+#Use SNP probes to infer identity and see how they cluster. 
+snp_betas <- getSnpBeta(GSE152380_ExtendedRGSet)
+
+identity_dendo <- dist(t(snp_betas))
+clust <- hclust(identity_dendo)
+dendo <- as.dendrogram(clust)   
+
+#Set colours to dendrogram leaves by Sample_Group.
+GSE152380_samplesheet$Sample_Group <- as.factor(GSE152380_samplesheet$Sample_Group)
+Label_GSE152380 <- GSE152380_samplesheet$Sample_Group
+Label_GSE152380 <- gsub("Case", "coral3", gsub("Control","burlywood2", Label_GSE152380))
+Colours_GSE152380 <- as.character(Label_GSE152380)
+Colours_GSE152380 <- Colours_GSE152380[order.dendrogram(dendo)]
+labels_colors(dendo) <- Colours_GSE152380
+
+labels(dendo) <- GSE152380_samplesheet$Sample_Name[order.dendrogram(dendo)]
+
+dendo %>% dendextend::set("labels_cex", 0.6) %>% hang.dendrogram %>% plot()
+```
+
+
+###Step 8: Outlier detection.
+
+The outlyx function takes any beta matrix (preferably raw) and will identify any samples that are inconsistent with the rest of the data. From the plot, we can observe that any data points that fall into the red squares are indeed outlying and should be removed from analysis.
+
+To confirm the previous identity dendrogram with no obvious outliers, I run the chunk below to see if there are any sample that falls within the two red squares in the plot.
+
+NOTE: GSM4613813 detected as an outlier. 
+
+```{r}
+betas <- getBeta(GSE152380_ExtendedRGSet)
+detout <- outlyx(betas)
+
+detout$Sample_Name <- rownames(detout)
+detout[which(detout$outliers == T),]
+```
+
+
+###Step 9: Sex check.
+
+minfi has a sex predictor function that uses the median values of measurements on the X and Y chromosomes respectively. If yMed - xMed is less than cutoff of -2, the sample is predicted as female; otherwise it is predicted as male.
+
+NOTE: No sex mismatch detected.
+
+```{r, fig.align='center'}
+#Sex prediction using minfi's getSex() function. 
+GSE152380_gRSet <- mapToGenome(GSE152380_MSet) #Convert to GenomicMethylSet object. 
+predSex <- getSex(GSE152380_gRSet)
+head(predSex)
+
+#Compare to Sex from metadata. 
+GSE152380_samplesheet$Sex <- as.factor(GSE152380_samplesheet$Sex)
+predSex$predictedSex <- as.factor(predSex$predictedSex)
+all.equal(GSE152380_samplesheet$Sex, predSex$predictedSex) #TRUE.
+
+#Plot predicted sex against reported sex from metadata.
+predictedSex <- as.data.frame(predSex)
+ggplot(predictedSex, aes(x = xMed, y = yMed, fill = GSE152380_samplesheet$Sex)) +
+  geom_point(shape = 21, size = 3, alpha = 0.8, col = "black") +
+  scale_fill_manual(values = c("#bd7b9f", "#2c7dab")) +
+  theme_classic()+
+  theme(axis.text.x = element_text(size = 14),
+        axis.text.y = element_text(size = 14),
+        axis.title.x = element_text(size = 15, vjust = -0.3),
+        axis.title.y = element_text(size = 15, vjust = 2),
+        legend.position = "none")
+```
+
+The sex of the samples cluster accordingly.
+
+ewastools has a similar sex predictor function that computes for each sample the average total intensities of all probes targeting either chromosome, X and Y respectively. Since total intensity is shown to be sensitive to copy number aberrations, the function exploits the natural difference in allosomal copy number to detect sex mismatches. The threshold to discriminate between both sexes is determined by the Hodges-Lehmann estimator (i.e. median of all pairwise male/female averages) for X and Y chromosomes separately.
+
+It is suggested that this approach is more robust than minfi’s getSex() function due to its potential to detect sex mismatches and allosomal outliers.
+
+```{r, fig.align='center'}
+#Sex prediction using ewastools' check_sex() function. 
+predicted_sex <- check_sex(GSE152380_meth)
+GSE152380_samplesheet <- GSE152380_samplesheet %>% mutate(normalized_X_intensity = predicted_sex$X,
+                        normalized_Y_intensity = predicted_sex$Y)
+
+#Sex plot.
+ggplot(GSE152380_samplesheet, aes(x = normalized_X_intensity, y = normalized_Y_intensity, fill = Sex)) +
+  geom_point(shape = 21, size = 3, alpha = 0.8, col = "black") + theme_classic() +
+  scale_fill_manual(values = c("#bd7b9f", "#2c7dab")) +
+  geom_text_repel(data = GSE152380_samplesheet %>% filter(Sex == 'M', normalized_X_intensity > 0.95,
+                                         normalized_Y_intensity < 0.5), 
+                  aes(label = Sample_Name), size = 3, force = 15, nudge_x = -0.1, nudge_y = -0.1) +
+  geom_hline(yintercept = 0.5, linetype = 'dashed', col = '#bd7b9f') + 
+  geom_vline(xintercept = 0.95, linetype = 'dashed', col = '#2c7dab') +
+  theme(axis.text.x = element_text(size = 14),
+        axis.text.y = element_text(size = 14),
+        axis.title.x = element_text(size = 15, vjust = -0.3),
+        axis.title.y = element_text(size = 15, vjust = 2),
+        legend.position = "none")
+```
+
+This second check confirms no sex mismatches in the samples.
+
+
+###Step 10: Age prediction with Horvath and Hannum's clocks.
+
+The Horvath's clock age prediction uses 353 CpG sites that were trained with over 8,000 samples to predict the ages of various tissues. 
+
+NOTE: All samples are predicted to be < 0 age using Horvath's clock.
+
+```{r}
+#Get betas because the clocks work on beta matrix.
+betas <- getBeta(GSE152380_ExtendedRGSet)
+
+#Horvath's clock.
+predictedAge <- as.numeric(agep(betas, coeff = NULL, method = "horvath")) #Coeff = NULL defaults to Horvath's coefficients. 
+
+ages_HO <- data.frame(Sample_Name = GSE152380_samplesheet$Sample_Name, PredictedAge = predictedAge)
+head(ages_HO)
+
+
+#Hannum's clock.
+data(hannumCoef)
+
+predictedAge <- as.numeric(agep(betas, coeff = hannumCoef, method = "hannum"))
+
+ages_HA <- data.frame(Sample_Name = GSE152380_samplesheet$Sample_Name, PredictedAge = predictedAge)
+head(ages_HA)
+```
+
+
+###Step 11: Remove samples that do not pass QC.
+
+NOTE: Removed GSM4613801 (**FAILED** control metrics, M+U check, contamination check) and GSM4613813 (**FAILED** control metrics, M+U check, contamination check, outlier detection)
+
+```{r}
+samples_to_remove <- c("GSM4613801", "GSM4613813")
+GSE152380_ExtendedRGSet <- GSE152380_ExtendedRGSet[, !colnames(GSE152380_ExtendedRGSet) %in% samples_to_remove]
+dim(GSE152380_ExtendedRGSet) #88 samples in the RGSet.
+dim(pData(GSE152380_ExtendedRGSet)) #88 samples in the pData.
+dim(getBeta(GSE152380_ExtendedRGSet)) #88 samples in the beta matrix.
+length(sampleNames(GSE152380_ExtendedRGSet)) #88 samples. 
+```
+
+```{r}
+save(GSE152380_ExtendedRGSet, file = "~/KoborLab/kobor_space/kendrix/Cell_Type_Prediction/GSE152380_ExtendedRGSet.RData")
+```
+
+---------------------------------------------------------------------------------------------------------------------------
+
+##Raw data PCA (After sample filtering)
+
+Code from Nicole Gladish, Rachel Edgar and Sumaiya Islam.
+
+Location: ~/KoborLab/kobor_space/shared_coding_resource/PCA Code.Rmd
+
+
+###Step 1: Prepare data for PCA_Plot function.
+
+```{r}
+betas <- getBeta(GSE152380_ExtendedRGSet) #Essentially use your mvalue matrix.
+meta <- pData(GSE152380_ExtendedRGSet)
+PCA_full <- princomp(na.omit(betas)) #You can't have NAs in your dataframe - make sure to either remove probes with a lot of NAs and/or have imputed values. Can run na.omit but depending on the stage of pre-processing, could result in a lot of probes to be removed and a very inaccurate PCA.
+Loadings <- as.data.frame(unclass(PCA_full$loadings))
+vars <- PCA_full$sdev^2
+Importance <- vars/sum(vars)
+adjust <- 1-Importance[1]
+pca_adjusted <- Importance[2:length(Importance)]/adjust
+pca_df <- data.frame(adjusted_variance = pca_adjusted, PC = seq(1:length(pca_adjusted)))
+
+#Restructure meta so that variables are in the appropriate format - categorical variables (sex is commonly labelled as 0 and 1) are factors and not numeric for example.
+
+colnames(meta)[6] <- "Sentrix_Position"
+colnames(meta)[7] <- "Sentrix_ID"
+
+meta$Sentrix_ID <- as.factor(meta$Sentrix_ID)
+meta$Sentrix_Position <- as.factor(meta$Sentrix_Position)
+meta$Sex <- as.factor(meta$Sex)
+meta$Sample_Group <- as.factor(meta$Sample_Group)
+
+colnames(meta) #Obtain the column numbers to include.
+meta_categorical <- data.frame(meta[, c(3,5,6,7)])  #Input column numbers in meta that contain categorical variables.
+colnames(meta_categorical) #Write the line below to ensure you're changing the names of your variables in the right order.
+colnames(meta_categorical) <- c("Sample_Group", "Sex", "Position", "Chip")
+
+Order <- seq(1:sum(ncol(meta_categorical)))
+Num <- 16 #This number will depend on your dataset - if you only have 6 samples, you should probably only show 5 PCs or less.
+```
+
+```{r}
+#Modified code from Rachel Edgar and Sumaiya Islam
+#To run the PC analysis, you need to run this code
+
+#Function of association meta variable with PC (ANOVA)
+heat_scree_plot<-function(Loadings, Importance, Num, Order){
+  adjust<-1-Importance[1]
+  pca_adjusted<-Importance[2:length(Importance)]/adjust
+  pca_df<-data.frame(adjusted_variance=pca_adjusted, PC=seq(1:length(pca_adjusted)))
+  
+  scree<-ggplot(pca_df[which(pca_df$PC<Num),],aes(PC,adjusted_variance))+geom_bar(stat = "identity",color="black",fill="grey")+theme_bw()+
+    theme(axis.text = element_text(size =19),
+          axis.title = element_text(size =19),
+          plot.margin=unit(c(1,1.5,0.2,2.25),"cm"))+ylab("Variance")+
+    scale_x_continuous(breaks = seq(1,Num,1))
+  
+  ##Heat
+  ##Correlate meta with PCS
+  ##Run ANOVA of each PC on each meta data variable
+  
+  aov_PC_meta<-lapply(1:ncol(meta_categorical), function(covar) sapply(1:ncol(Loadings), function(PC) summary(aov(Loadings[,PC]~meta_categorical[,covar]))[[1]]$"Pr(>F)"[1]))
+  names(aov_PC_meta)<-colnames(meta_categorical)
+  aov_PC_meta<-do.call(rbind, aov_PC_meta)
+  aov_PC_meta<-as.data.frame(aov_PC_meta)
+  #Adjust
+  aov_PC_meta_adjust<-aov_PC_meta[,2:ncol(aov_PC_meta)]
+  
+  #Reshape
+  avo<-aov_PC_meta_adjust[,1:(Num-1)]
+  avo_heat_num<-apply(avo,2, as.numeric)
+  avo_heat<-as.data.frame(avo_heat_num)
+  colnames(avo_heat)<-sapply(1:(Num-1), function(x) paste("PC",x, sep=""))
+  avo_heat$meta<-rownames(avo)
+  avo_heat_melt<-melt(avo_heat, id=c("meta"))
+  
+  #Cluster meta data
+  ord <- Order
+  meta_var_order<-unique(avo_heat_melt$meta)[rev(ord)]
+  avo_heat_melt$meta <- factor(avo_heat_melt$meta, levels = meta_var_order)
+  
+  #Color if sig
+  # avo_heat_melt$Pvalue<-sapply(1:nrow(avo_heat_melt), function(x) if(avo_heat_melt$value[x]>=0.9){">=0.9"}else{
+  # if(avo_heat_melt$value[x]>=0.5){">=0.5"}else{
+  # if(avo_heat_melt$value[x]>=0.1){">=0.1"}else{"<0.1"}}})
+  avo_heat_melt$Pvalue<-sapply(1:nrow(avo_heat_melt), function(x) if(avo_heat_melt$value[x]<=0.001){"<=0.001"}else{
+    if(avo_heat_melt$value[x]<=0.01){"<=0.01"}else{
+      if(avo_heat_melt$value[x]<=0.05){"<=0.05"}else{">0.05"}}})
+  
+  heat<-ggplot(avo_heat_melt, aes(variable,meta, fill = Pvalue)) +
+    geom_tile(color = "black",size=0.5) +
+    theme_gray(8)+scale_fill_manual(values=c("#c68142","#c6a242","#ded591","#f6f3df"))+
+    theme(axis.text = element_text(size =10, color="black"),
+          axis.text.x = element_text(),
+          axis.title = element_text(size =20),
+          legend.text = element_text(size =18.5),
+          legend.title = element_text(size =18.5),
+          legend.position = "bottom",
+          plot.margin=unit(c(0,2.25,1,1),"cm"))+
+    xlab("Principal Component")+ylab(NULL)
+  
+  grid.arrange(scree, heat, ncol=1, heights = c(2, 4))
+}
+```
+
+
+###Step 2: Run PCA.
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.height=7, fig.width=8}
+#Run PCA.
+heat_scree_plot(Loadings, Importance, Num, Order)
+```
+
+---------------------------------------------------------------------------------------------------------------------------
+
+##Normalisation
+
+
+###Step 1: Visualise pre-normalised distribution of beta values.
+
+```{r, fig.align='center'}
+GSE152380_MSet <- preprocessRaw(GSE152380_ExtendedRGSet) #Get MSet object from RGSet.
+
+plotBetasByType(GSE152380_MSet[,1])
+```
+
+
+###Step 2: Perform funnorm normalisation.
+
+The function preprocessFunnorm implements the functional normalization algorithm developed in Jean-Philippe Fortin et al. 2014. Briefly, it uses the internal control probes present on the array to infer between-array technical variation. It is particularly useful for studies comparing conditions with known large-scale differences, such as cancer/normal studies, or between-tissue studies. It has been shown that for such studies, functional normalization outperforms other existing approaches (Jean-Philippe Fortin et al. 2014). By default, the function applies the preprocessNoob function as a first step for background substraction, and uses the first two principal components of the control probes to infer the unwanted variation.
+
+Using the internal control probes avoids the problems associated with global normalization methods, where biological variation can be mistaken for a technical effect and removed. This is especially important in studies where groups are expected to have differential methylomes, such as multiple tissue studies.
+
+The plot above shows that only a small amount of variance is explained after the seventh principal component. For this reason, I choose to carry out normalization using 7 principal components.
+
+```{r, fig.align='center'}
+#Perform funnorm normalisation.
+GSE152380_gRSet.funnorm <- preprocessFunnorm(GSE152380_ExtendedRGSet, nPCs = 7)
+GSE152380_gRSet.funnorm
+
+#Plot to visualise post-normalisation distribution. 
+betas.funnorm <- getBeta(GSE152380_gRSet.funnorm)
+probeTypes <- data.frame(Name = featureNames(GSE152380_gRSet.funnorm),
+                         Type = getProbeType(GSE152380_gRSet.funnorm)) #Get manifest information for plot.
+plotBetasByType(betas.funnorm[,1], probeTypes = probeTypes)
+```
+
+```{r, eval=FALSE}
+save(GSE152380_gRSet.funnorm, file = "~/KoborLab/kobor_space/kendrix/Cell_Type_Prediction/GSE152380_gRSet.funnorm.RData")
+```
+
+---------------------------------------------------------------------------------------------------------------------------
+
+##Probe filtering
+
+
+###Step 1: Filtering SNP probes.
+
+Because the presence of SNPs inside the probe body or at the nucleotide extension can have important consequences on the downstream analysis, minfi offers the possibility to remove such probes. The function getSnpInfo, applied to a GenomicRatioSet, returns a data frame with 6 columns containing the SNP information of the probes:
+
+```{r}
+#Get SNP info.
+snps <- getSnpInfo(GSE152380_gRSet.funnorm)
+head(snps, 10)
+```
+
+Probe, CpG and SBE correspond the SNPs present inside the probe body, at the CpG interrogation and at the single nucleotide extension respectively. The columns with rs give the names of the SNPs while the columns with maf gives the minor allele frequency of the SNPs based on the dbSnp database. The function addSnpInfo will add to the GenomicRanges of the GenomicRatioSet the 6 columns:
+
+```{r}
+#Add SNP info to Genomic Ratio Set object.
+GSE152380_gRSet.funnorm <- addSnpInfo(GSE152380_gRSet.funnorm)
+```
+
+We strongly recommend to drop the probes that contain either a SNP at the CpG interrogation or at the single nucleotide extension.The function dropLociWithSnps allows to drop the corresponding probes. Here is an example where we drop the probes containing a SNP at the CpG interrogation and/or at the single nucleotide extension, for any minor allele frequency:
+
+```{r}
+#Drop SNPs.
+GSE152380_gRSet.funnorm <- dropLociWithSnps(GSE152380_gRSet.funnorm, snps = c("SBE", "CpG"), maf = 0)
+```
+
+
+
+
+
+
+
+
+

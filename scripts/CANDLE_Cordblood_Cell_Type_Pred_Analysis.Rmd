@@ -1,0 +1,1193 @@
+---
+title: "CANDLE_CORD_Cell_Type_Prediction"
+author: "Kendrix"
+date: "8/5/2020"
+output: 
+  html_document:
+    highlight: pygments
+      theme: cerulean
+      toc: true
+      toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Aim: To test cell type prediction on CANDLE cord tissue.
+
+---------------------------------------------------------------------------------------------------------------------------
+
+```{r, echo=TRUE, results='hide', warning=FALSE, message=FALSE}
+library(GEOquery)
+library(RCurl)
+library(GEOmetadb)
+library(dendextend)
+library(ArrayExpress)
+library(methylumi)
+library(lumi)
+library(lattice)
+library(gplots)
+library(RColorBrewer)
+library(limma)
+library(ROC)
+library(matrixStats)
+library(reshape)
+library(sva)
+library(grid)
+library(gridExtra)
+library(ape)
+library(Hmisc)
+library(RCurl)
+library(wateRmelon)
+library(minfiData)
+library(minfi)
+library(robustHD)
+library(ewastools)
+library(omicsPrint)
+library(doParallel)
+library(jcolors)
+library(plyr)
+library(tidyverse)
+library(ggrepel)
+library(ggpubr)
+library(IlluminaHumanMethylationEPICanno.ilm10b2.hg19)
+library(IlluminaHumanMethylationEPICmanifest)
+library(FlowSorted.Blood.EPIC)
+library(FlowSorted.Blood.450k)
+library(FlowSorted.CordBloodCombined.450k)
+library(Biobase)
+library(data.table)
+library(factoextra)
+library(Metrics)
+library(quantro)
+library(latex2exp)
+
+setwd("~/KoborLab/kobor_space/kendrix/Cell_Type_Prediction/")
+```
+
+---------------------------------------------------------------------------------------------------------------------------
+
+
+###Step 1: Subset 100 random samples from CANDLE CORD RGSet. 
+
+```{r, eval=FALSE}
+#Read RGSet from Chaini's CANDLE folder.
+CORD <- readRDS("~/KoborLab/kobor_space/ckonwar/CANDLE/CORD.rds")
+dim(CORD) #582 samples.
+
+CORD_CANDLE_100 <- CORD[, 1:100]
+dim(CORD_CANDLE_100)
+
+save(CORD_CANDLE_100, file = "~/KoborLab/kobor_space/kendrix/Cell_Type_Prediction/CORD_CANDLE_100.RData")
+```
+
+
+###Step 2: Load CANDLE cord samples and remove NA.
+
+```{r}
+#Load subsetted CANDLE cord samples.
+load("~/KoborLab/kobor_space/kendrix/Cell_Type_Prediction/CORD_CANDLE_100.RData")
+
+#Get betas. 
+CORD_CANDLE_100_betas <- getBeta(CORD_CANDLE_100)
+sum(is.na(CORD_CANDLE_100_betas)) #2596 NA - needs to be 0.
+CORD_CANDLE_100_betas <- na.omit(CORD_CANDLE_100_betas) #Remove NAs from beta matrix.
+sum(is.na(CORD_CANDLE_100_betas)) #Should be 0.
+
+#Load the latest cell type predictor for cord blood.
+source("~/KoborLab/kobor_space/shared_coding_resource/ECC9.R")
+```
+
+
+###Step 3: Run cord predictor.
+
+Using FlowSorted.CordBloodCombined.450K reference dataset:
+
+- The code below attempts to predict the cell type composition of 100 randomly chosen CANDLE samples using both IDOL and auto methods to identify the L-DMR (leukocyte differentially methylated regions) library - which is a set of cell-type specific DNAm candidate markers that are optimised to accurately estimate cell types. The methods differ in their interrogation of probes to identify cell type differences. 
+
+- Automatic method: Picks the top 50 hyper- and hypo-methylated probes for each cell type based on t-statistic ranking (600 probes in total).
+
+- IDOL method: Iteratively identifies 450 probes that optimise prediction performance across six leucocyte subtypes. 
+
+Here, I'm looking at the differences in the cell type composition estimated using IDOL and auto methods in cord blood of the CANDLE dataset using the [FlowSorted.CordBloodCombined.450K reference dataset](https://clinicalepigeneticsjournal.biomedcentral.com/articles/10.1186/s13148-019-0717-y).
+
+```{r}
+#Load IDOL optimised CpGs for cord blood.
+data("IDOLOptimizedCpGsCordBlood")
+
+#Using IDOL method. 
+
+#Run predictor. Input: Dataset betas. Select tissueType according to tissue type of dataset. arrayType is only needed if tissueType is "blood".
+CANDLE_celltype.cord.IDOL <- ECC9(CORD_CANDLE_100_betas, tissueType = "cord", arrayType = "EPIC", probelist = "IDOL", verbose = TRUE)
+CANDLE_celltype.cord.IDOL_counts <- as.data.frame(CANDLE_celltype.cord.IDOL$counts)
+
+#Melt data for plotting. 
+CANDLE_celltype.cord.IDOL_melt <- gather(CANDLE_celltype.cord.IDOL_counts)
+colnames(CANDLE_celltype.cord.IDOL_melt)[1] <- "Cell_type"
+colnames(CANDLE_celltype.cord.IDOL_melt)[2] <- "Estimated_proportions"
+
+
+#Using auto method.
+
+#Run predictor. Input: Dataset betas. Select tissueType according to tissue type of dataset. arrayType is only needed if tissueType is "blood".
+CANDLE_celltype.cord.auto <- ECC9(CORD_CANDLE_100_betas, tissueType = "cord", arrayType = "EPIC", probelist = "auto", verbose = TRUE)
+CANDLE_celltype.cord.auto_counts <- as.data.frame(CANDLE_celltype.cord.auto$counts)
+
+#Melt data for plotting. 
+CANDLE_celltype.cord.auto_melt <- gather(CANDLE_celltype.cord.auto_counts)
+colnames(CANDLE_celltype.cord.auto_melt)[1] <- "Cell_type"
+colnames(CANDLE_celltype.cord.auto_melt)[2] <- "Estimated_proportions"
+```
+
+```{r, fig.align='center'}
+CANDLE_celltype.cord.IDOL_melt$method <- "IDOL"
+CANDLE_celltype.cord.auto_melt$method <- "Auto"
+
+CANDLE_celltype.cord_melt <- rbind(CANDLE_celltype.cord.IDOL_melt, CANDLE_celltype.cord.auto_melt)
+
+ggplot(CANDLE_celltype.cord_melt, aes(factor(Cell_type), Estimated_proportions)) + 
+  geom_boxplot(aes(fill = method), outlier.shape = NA) + 
+  geom_jitter(aes(fill = method), size = 2, shape = 21, alpha = 0.7, 
+              position = position_jitterdodge(dodge.width = 0.7, jitter.width = 0.1)) + 
+  labs(x = "Cell Type", y = "Estimated Proportions", fill = "Method",
+       caption = "Estimated cell type proportion of CANDLE cord blood using IDOL and auto methods (Reference dataset: FlowSorted.CordBloodCombined.450K)") +
+  scale_fill_manual(values = c("#D16103", "#52854C")) +
+  theme_classic() + theme(plot.caption = element_text(hjust = 0.5, size = 12))
+```
+
+```{r, fig.align='center'}
+CANDLE_celltype.cord <- cbind(CANDLE_celltype.cord.IDOL_melt, CANDLE_celltype.cord.auto_melt)
+CANDLE_celltype.cord <- CANDLE_celltype.cord[, -c(3,4,6)]
+colnames(CANDLE_celltype.cord)[2] <- "Estimated_proportions_IDOL"
+colnames(CANDLE_celltype.cord)[3] <- "Estimated_proportions_Auto"
+
+
+#Visualise individual regressions.
+#Create function to plot linear regression.
+ggplotRegression <- function (fit) {
+
+require(ggplot2)
+
+ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+  geom_point(aes(color = names(fit$model)[2]), show.legend = FALSE) +
+  stat_smooth(method = "lm", col = "red")
+}
+
+
+#CD8T:
+celltype_CD8T <- subset(CANDLE_celltype.cord, Cell_type == "CD8T")
+
+#Regression plot of estimated cell type proportions using IDOL and Auto methods.
+celltype_CD8T_plot <- lm(Estimated_proportions_IDOL ~ Estimated_proportions_Auto, data = celltype_CD8T)
+CD8T_plot <- ggplotRegression(celltype_CD8T_plot) + 
+  annotate('text', x = 0, y = 0.1, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(celltype_CD8T_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.048, y = 0.1, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(celltype_CD8T_plot$model$Estimated_proportions_Auto, celltype_CD8T_plot$model$Estimated_proportions_IDOL), 4), "$"))) +
+  labs(x = "Cell Type Proportion (Auto)", y = "Cell Type Proportion (IDOL)", caption = "Cell Type: CD8+T Cells") + 
+  scale_color_manual(values = "#E69F00") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#CD4T:
+celltype_CD4T <- subset(CANDLE_celltype.cord, Cell_type == "CD4T")
+
+#Regression plot of estimated cell type proportions using IDOL and Auto methods.
+celltype_CD4T_plot <- lm(Estimated_proportions_IDOL ~ Estimated_proportions_Auto, data = celltype_CD4T)
+CD4T_plot <- ggplotRegression(celltype_CD4T_plot) + 
+  annotate('text', x = 0, y = 0.31, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(celltype_CD4T_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.07, y = 0.31, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(celltype_CD4T_plot$model$Estimated_proportions_Auto, celltype_CD4T_plot$model$Estimated_proportions_IDOL), 4), "$"))) +
+  labs(x = "Cell Type Proportion (Auto)", y = "Cell Type Proportion (IDOL)", caption = "Cell Type: CD4+T Cells") +
+  scale_color_manual(values = "#56B4E9") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#NK:
+celltype_NK <- subset(CANDLE_celltype.cord, Cell_type == "NK")
+
+#Regression plot of estimated cell type proportions using IDOL and Auto methods.
+celltype_NK_plot <- lm(Estimated_proportions_IDOL ~ Estimated_proportions_Auto, data = celltype_NK)
+NK_plot <- ggplotRegression(celltype_NK_plot) + 
+  annotate('text', x = 0, y = 0.078, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(celltype_NK_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.027, y = 0.078, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(celltype_NK_plot$model$Estimated_proportions_Auto, celltype_NK_plot$model$Estimated_proportions_IDOL), 4), "$"))) +
+  labs(x = "Cell Type Proportion (Auto)", y = "Cell Type Proportion (IDOL)", caption = "Cell Type: NK Cells") + 
+  scale_color_manual(values = "#009E73") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#Bcell:
+celltype_Bcell <- subset(CANDLE_celltype.cord, Cell_type == "Bcell")
+
+#Regression plot of estimated cell type proportions using IDOL and Auto methods.
+celltype_Bcell_plot <- lm(Estimated_proportions_IDOL ~ Estimated_proportions_Auto, data = celltype_Bcell)
+Bcell_plot <- ggplotRegression(celltype_Bcell_plot) + 
+  annotate('text', x = 0, y = 0.18, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(celltype_Bcell_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.052, y = 0.18, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(celltype_Bcell_plot$model$Estimated_proportions_Auto, celltype_Bcell_plot$model$Estimated_proportions_IDOL), 4), "$"))) +
+  labs(x = "Cell Type Proportion (Auto)", y = "Cell Type Proportion (IDOL)", caption = "Cell Type: B Cells") +
+  scale_color_manual(values = "#7F44AB") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#Mono:
+celltype_Mono <- subset(CANDLE_celltype.cord, Cell_type == "Mono")
+
+#Regression plot of estimated cell type proportions using IDOL and Auto methods.
+celltype_Mono_plot <- lm(Estimated_proportions_IDOL ~ Estimated_proportions_Auto, data = celltype_Mono)
+Mono_plot <- ggplotRegression(celltype_Mono_plot) + 
+  annotate('text', x = 0, y = 0.16, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(celltype_Mono_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.05, y = 0.16, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(celltype_Mono_plot$model$Estimated_proportions_Auto, celltype_Mono_plot$model$Estimated_proportions_IDOL), 4), "$"))) +
+  labs(x = "Cell Type Proportion (Auto)", y = "Cell Type Proportion (IDOL)", caption = "Cell Type: Monocytes") +
+  scale_color_manual(values = "#0072B2") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#nRBC:
+celltype_nRBC <- subset(CANDLE_celltype.cord, Cell_type == "nRBC")
+
+#Regression plot of estimated cell type proportions using IDOL and Auto methods.
+celltype_nRBC_plot <- lm(Estimated_proportions_IDOL ~ Estimated_proportions_Auto, data = celltype_nRBC)
+nRBC_plot <- ggplotRegression(celltype_nRBC_plot) + 
+  annotate('text', x = 0, y = 0.28, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(celltype_nRBC_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.09, y = 0.28, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(celltype_nRBC_plot$model$Estimated_proportions_Auto, celltype_nRBC_plot$model$Estimated_proportions_IDOL), 4), "$"))) +
+  labs(x = "Cell Type Proportion (Auto)", y = "Cell Type Proportion (IDOL)", caption = "Cell Type: Nucleated RBCs") +
+  scale_color_manual(values = "#D55E00") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#Gran:
+celltype_gran <- subset(CANDLE_celltype.cord, Cell_type == "Gran")
+
+#Regression plot of estimated cell type proportions using IDOL and Auto methods.
+celltype_gran_plot <- lm(Estimated_proportions_IDOL ~ Estimated_proportions_Auto, data = celltype_gran)
+gran_plot <- ggplotRegression(celltype_gran_plot) + 
+  annotate('text', x = 0.1, y = 0.65, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(celltype_gran_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.25, y = 0.65, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(celltype_gran_plot$model$Estimated_proportions_Auto, celltype_gran_plot$model$Estimated_proportions_IDOL), 4), "$"))) +
+  labs(x = "Cell Type Proportion (Auto)", y = "Cell Type Proportion (IDOL)", caption = "Cell Type: Granulocytes") + 
+  scale_color_manual(values = "#CC79A7") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#Combine plots.
+ggarrange(CD8T_plot, CD4T_plot, NK_plot, Bcell_plot, Mono_plot, gran_plot, nRBC_plot + rremove("x.text"), 
+          labels = c("A", "B", "C", "D", "E", "F", "G"),
+          ncol = 3, nrow = 3)
+```
+
+
+###Step 4: Run blood predictor (450K reference dataset).
+
+Using FlowSorted.Blood.450K reference dataset:
+
+- The code below attempts to predict the cell type composition of 100 randomly chosen CANDLE samples using both IDOL and auto methods to identify the L-DMR (leukocyte differentially methylated regions) library - which is a set of cell-type specific DNAm candidate markers that are optimised to accurately estimate cell types. The methods differ in their interrogation of probes to identify cell type differences. 
+
+- Automatic method: Picks the top 50 hyper- and hypo-methylated probes for each cell type based on t-statistic ranking (600 probes in total).
+
+- IDOL method: Iteratively identifies 450 probes that optimise prediction performance across six leucocyte subtypes. 
+
+Here, I'm looking at the differences in the cell type composition estimated using IDOL and auto methods in cord blood of the CANDLE dataset using the [FlowSorted.Blood.450K reference dataset](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-018-1448-7#Ack1).
+
+```{r}
+#Using IDOL method. 
+
+#Run predictor. Input: Dataset betas. Select tissueType according to tissue type of dataset. arrayType is only needed if tissueType is "blood".
+CANDLE_celltype.blood.450K.IDOL <- ECC9(CORD_CANDLE_100_betas, tissueType = "blood", arrayType = "450K", probelist = "IDOL", verbose = TRUE)
+CANDLE_celltype.blood.450K.IDOL_counts <- as.data.frame(CANDLE_celltype.blood.450K.IDOL$counts)
+
+#Melt data for plotting. 
+CANDLE_celltype.blood.450K.IDOL_melt <- gather(CANDLE_celltype.blood.450K.IDOL_counts)
+colnames(CANDLE_celltype.blood.450K.IDOL_melt)[1] <- "Cell_type"
+colnames(CANDLE_celltype.blood.450K.IDOL_melt)[2] <- "Estimated_proportions"
+
+
+#Using auto method.
+
+#Run predictor. Input: Dataset betas. Select tissueType according to tissue type of dataset. arrayType is only needed if tissueType is "blood".
+CANDLE_celltype.blood.450K.auto <- ECC9(CORD_CANDLE_100_betas, tissueType = "blood", arrayType = "450K", probelist = "auto", verbose = TRUE)
+CANDLE_celltype.blood.450K.auto_counts <- as.data.frame(CANDLE_celltype.blood.450K.auto$counts)
+
+#Melt data for plotting. 
+CANDLE_celltype.blood.450K.auto_melt <- gather(CANDLE_celltype.blood.450K.auto_counts)
+colnames(CANDLE_celltype.blood.450K.auto_melt)[1] <- "Cell_type"
+colnames(CANDLE_celltype.blood.450K.auto_melt)[2] <- "Estimated_proportions"
+```
+
+```{r, fig.align='center'}
+CANDLE_celltype.blood.450K.IDOL_melt$method <- "IDOL"
+CANDLE_celltype.blood.450K.auto_melt$method <- "Auto"
+
+CANDLE_celltype.blood.450K_melt <- rbind(CANDLE_celltype.blood.450K.IDOL_melt, CANDLE_celltype.blood.450K.auto_melt)
+
+ggplot(CANDLE_celltype.blood.450K_melt, aes(factor(Cell_type), Estimated_proportions)) + 
+  geom_boxplot(aes(fill = method), outlier.shape = NA) + 
+  geom_jitter(aes(fill = method), size = 2, shape = 21, alpha = 0.7, 
+              position = position_jitterdodge(dodge.width = 0.7, jitter.width = 0.1)) + 
+  labs(x = "Cell Type", y = "Estimated Proportions", fill = "Method",
+       caption = "Estimated cell type proportion of CANDLE cord blood using IDOL and auto methods (Reference dataset: FlowSorted.Blood.450K)") +
+  scale_fill_manual(values = c("#D16103", "#52854C")) +
+  theme_classic() + theme(plot.caption = element_text(hjust = 0.5, size = 12))
+```
+
+```{r, fig.align='center'}
+CANDLE_celltype.blood.450K <- cbind(CANDLE_celltype.blood.450K.IDOL_melt, CANDLE_celltype.blood.450K.auto_melt)
+CANDLE_celltype.blood.450K <- CANDLE_celltype.blood.450K[, -c(3,4,6)]
+colnames(CANDLE_celltype.blood.450K)[2] <- "Estimated_proportions_IDOL"
+colnames(CANDLE_celltype.blood.450K)[3] <- "Estimated_proportions_Auto"
+
+
+#Visualise individual regressions.
+#Create function to plot linear regression.
+ggplotRegression <- function (fit) {
+
+require(ggplot2)
+
+ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+  geom_point(aes(color = names(fit$model)[2]), show.legend = FALSE) +
+  stat_smooth(method = "lm", col = "red")
+}
+
+
+#CD8T:
+celltype.450K_CD8T <- subset(CANDLE_celltype.blood.450K, Cell_type == "CD8T")
+
+#Regression plot of estimated cell type proportions using IDOL and Auto methods.
+celltype.450K_CD8T_plot <- lm(Estimated_proportions_IDOL ~ Estimated_proportions_Auto, data = celltype.450K_CD8T)
+CD8T.450K_plot <- ggplotRegression(celltype.450K_CD8T_plot) + 
+  annotate('text', x = 0.052, y = 0.175, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(celltype.450K_CD8T_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.085, y = 0.175, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(celltype.450K_CD8T_plot$model$Estimated_proportions_Auto, celltype.450K_CD8T_plot$model$Estimated_proportions_IDOL), 4), "$"))) +
+  labs(x = "Cell Type Proportion (Auto)", y = "Cell Type Proportion (IDOL)", caption = "Cell Type: CD8+T Cells") +
+  scale_color_manual(values = "#E69F00") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#CD4T:
+celltype.450K_CD4T <- subset(CANDLE_celltype.blood.450K, Cell_type == "CD4T")
+
+#Regression plot of estimated cell type proportions using IDOL and Auto methods.
+celltype.450K_CD4T_plot <- lm(Estimated_proportions_IDOL ~ Estimated_proportions_Auto, data = celltype.450K_CD4T)
+CD4T.450K_plot <- ggplotRegression(celltype.450K_CD4T_plot) + 
+  annotate('text', x = 0, y = 0.25, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(celltype.450K_CD4T_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.08, y = 0.25, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(celltype.450K_CD4T_plot$model$Estimated_proportions_Auto, celltype.450K_CD4T_plot$model$Estimated_proportions_IDOL), 4), "$"))) +
+  labs(x = "Cell Type Proportion (Auto)", y = "Cell Type Proportion (IDOL)", caption = "Cell Type: CD4+T Cells") +
+  scale_color_manual(values = "#56B4E9") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#NK:
+celltype.450K_NK <- subset(CANDLE_celltype.blood.450K, Cell_type == "NK")
+
+#Regression plot of estimated cell type proportions using IDOL and Auto methods.
+celltype.450K_NK_plot <- lm(Estimated_proportions_IDOL ~ Estimated_proportions_Auto, data = celltype.450K_NK)
+NK.450K_plot <- ggplotRegression(celltype.450K_NK_plot) + 
+  annotate('text', x = 0, y = 0.17, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(celltype.450K_NK_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.025, y = 0.17, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(celltype.450K_NK_plot$model$Estimated_proportions_Auto, celltype.450K_NK_plot$model$Estimated_proportions_IDOL), 4), "$"))) +
+  labs(x = "Cell Type Proportion (Auto)", y = "Cell Type Proportion (IDOL)", caption = "Cell Type: NK Cells") + 
+  scale_color_manual(values = "#009E73") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#Bcell:
+celltype.450K_Bcell <- subset(CANDLE_celltype.blood.450K, Cell_type == "Bcell")
+
+#Regression plot of estimated cell type proportions using IDOL and Auto methods.
+celltype.450K_Bcell_plot <- lm(Estimated_proportions_IDOL ~ Estimated_proportions_Auto, data = celltype.450K_Bcell)
+Bcell.450K_plot <- ggplotRegression(celltype.450K_Bcell_plot) + 
+  annotate('text', x = 0.03, y = 0.21, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(celltype.450K_Bcell_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.088, y = 0.21, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(celltype.450K_Bcell_plot$model$Estimated_proportions_Auto, celltype.450K_Bcell_plot$model$Estimated_proportions_IDOL), 4), "$"))) +
+  labs(x = "Cell Type Proportion (Auto)", y = "Cell Type Proportion (IDOL)", caption = "Cell Type: B Cells") +
+  scale_color_manual(values = "#7F44AB") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#Mono:
+celltype.450K_Mono <- subset(CANDLE_celltype.blood.450K, Cell_type == "Mono")
+
+#Regression plot of estimated cell type proportions using IDOL and Auto methods.
+celltype.450K_Mono_plot <- lm(Estimated_proportions_IDOL ~ Estimated_proportions_Auto, data = celltype.450K_Mono)
+Mono.450K_plot <- ggplotRegression(celltype.450K_Mono_plot) + 
+  annotate('text', x = 0, y = 0.22, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(celltype.450K_Mono_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.05, y = 0.22, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(celltype.450K_Mono_plot$model$Estimated_proportions_Auto, celltype.450K_Mono_plot$model$Estimated_proportions_IDOL), 4), "$"))) +
+  labs(x = "Cell Type Proportion (Auto)", y = "Cell Type Proportion (IDOL)", caption = "Cell Type: Monocytes") +
+  scale_color_manual(values = "#0072B2") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#Gran:
+celltype.450K_gran <- subset(CANDLE_celltype.blood.450K, Cell_type == "Gran")
+
+#Regression plot of estimated cell type proportions using IDOL and Auto methods.
+celltype.450K_gran_plot <- lm(Estimated_proportions_IDOL ~ Estimated_proportions_Auto, data = celltype.450K_gran)
+gran.450K_plot <- ggplotRegression(celltype.450K_gran_plot) + 
+  annotate('text', x = 0.15, y = 0.72, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(celltype.450K_gran_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.3, y = 0.72, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(celltype.450K_gran_plot$model$Estimated_proportions_Auto, celltype.450K_gran_plot$model$Estimated_proportions_IDOL), 4), "$"))) +
+  labs(x = "Cell Type Proportion (Auto)", y = "Cell Type Proportion (IDOL)", caption = "Cell Type: Granulocytes") +
+  scale_color_manual(values = "#CC79A7") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#Combine plots.
+ggarrange(CD8T.450K_plot, CD4T.450K_plot, NK.450K_plot, Bcell.450K_plot, Mono.450K_plot, gran.450K_plot + rremove("x.text"), 
+          labels = c("A", "B", "C", "D", "E", "F"),
+          ncol = 3, nrow = 2)
+```
+
+
+###Step 5: Run blood predictor (EPIC reference dataset).
+
+Using FlowSorted.Blood.EPIC reference dataset:
+
+```{r}
+#Using IDOL method. 
+
+#Run predictor. Input: Dataset betas. Select tissueType according to tissue type of dataset. arrayType is only needed if tissueType is "blood".
+CANDLE_celltype.blood.EPIC.IDOL <- ECC9(CORD_CANDLE_100_betas, tissueType = "blood", arrayType = "EPIC", probelist = "IDOL", verbose = TRUE)
+CANDLE_celltype.blood.EPIC.IDOL_counts <- as.data.frame(CANDLE_celltype.blood.EPIC.IDOL$counts)
+
+#Melt data for plotting. 
+CANDLE_celltype.blood.EPIC.IDOL_melt <- gather(CANDLE_celltype.blood.EPIC.IDOL_counts)
+colnames(CANDLE_celltype.blood.EPIC.IDOL_melt)[1] <- "Cell_type"
+colnames(CANDLE_celltype.blood.EPIC.IDOL_melt)[2] <- "Estimated_proportions"
+
+
+#Using auto method.
+
+#Run predictor. Input: Dataset betas. Select tissueType according to tissue type of dataset. arrayType is only needed if tissueType is "blood".
+CANDLE_celltype.blood.EPIC.auto <- ECC9(CORD_CANDLE_100_betas, tissueType = "blood", arrayType = "EPIC", probelist = "auto", verbose = TRUE)
+CANDLE_celltype.blood.EPIC.auto_counts <- as.data.frame(CANDLE_celltype.blood.EPIC.auto$counts)
+
+#Melt data for plotting. 
+CANDLE_celltype.blood.EPIC.auto_melt <- gather(CANDLE_celltype.blood.EPIC.auto_counts)
+colnames(CANDLE_celltype.blood.EPIC.auto_melt)[1] <- "Cell_type"
+colnames(CANDLE_celltype.blood.EPIC.auto_melt)[2] <- "Estimated_proportions"
+```
+
+
+###Step 6: Compare between reference datasets for each method.
+
+Comparing between reference datasets that are built using **IDOL**:
+
+```{r}
+#Make the number of IDOL cell types the same and bind the IDOL data together.
+CANDLE_celltype.cord.IDOL_melt <- subset(CANDLE_celltype.cord.IDOL_melt, !Cell_type == "nRBC") #Blood ref dataset does not have nRBC cell type.
+CANDLE_celltype.cord.blood.IDOL <- cbind(CANDLE_celltype.cord.IDOL_melt, CANDLE_celltype.blood.450K.IDOL_melt)
+CANDLE_celltype.cord.blood.IDOL <- CANDLE_celltype.cord.blood.IDOL[, -c(3,4,6)]
+colnames(CANDLE_celltype.cord.blood.IDOL)[2] <- "Estimated_proportions_cord"
+colnames(CANDLE_celltype.cord.blood.IDOL)[3] <- "Estimated_proportions_blood.450k"
+```
+
+```{r, fig.align='center'}
+#Visualise individual regressions.
+#Create function to plot linear regression.
+ggplotRegression <- function (fit) {
+
+require(ggplot2)
+
+ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+  geom_point(aes(color = names(fit$model)[2]), show.legend = FALSE) +
+  stat_smooth(method = "lm", col = "red")
+}
+
+
+#CD8T:
+cord.blood.IDOL_CD8T <- subset(CANDLE_celltype.cord.blood.IDOL, Cell_type == "CD8T")
+
+#Regression plot of estimated cell type proportions using different reference datasets.
+cord.blood.IDOL_CD8T_plot <- lm(Estimated_proportions_cord ~ Estimated_proportions_blood.450k, data = cord.blood.IDOL_CD8T)
+CD8T.cord.blood.IDOL_plot <- ggplotRegression(cord.blood.IDOL_CD8T_plot) + 
+  annotate('text', x = 0, y = 0.12, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(cord.blood.IDOL_CD8T_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.048, y = 0.12, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(cord.blood.IDOL_CD8T_plot$model$Estimated_proportions_blood.450k, cord.blood.IDOL_CD8T_plot$model$Estimated_proportions_cord), 4), "$"))) +
+  labs(x = "Cell Type Proportion (FlowSorted.Blood.450K)", y = "Cell Type Proportion (FlowSorted.CordBloodCombined.450K)", caption = "Cell Type: CD8+T Cells, Method: IDOL") +
+  scale_color_manual(values = "#E69F00") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#CD4T:
+cord.blood.IDOL_CD4T <- subset(CANDLE_celltype.cord.blood.IDOL, Cell_type == "CD4T")
+
+#Regression plot of estimated cell type proportions using different reference datasets.
+cord.blood.IDOL_CD4T_plot <- lm(Estimated_proportions_cord ~ Estimated_proportions_blood.450k, data = cord.blood.IDOL_CD4T)
+CD4T.cord.blood.IDOL_plot <- ggplotRegression(cord.blood.IDOL_CD4T_plot) + 
+  annotate('text', x = 0, y = 0.33, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(cord.blood.IDOL_CD4T_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.068, y = 0.33, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(cord.blood.IDOL_CD4T_plot$model$Estimated_proportions_blood.450k, cord.blood.IDOL_CD4T_plot$model$Estimated_proportions_cord), 4), "$"))) +
+  labs(x = "Cell Type Proportion (FlowSorted.Blood.450K)", y = "Cell Type Proportion (FlowSorted.CordBloodCombined.450K)", caption = "Cell Type: CD4+T Cells, Method: IDOL") +
+  scale_color_manual(values = "#56B4E9") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#NK:
+cord.blood.IDOL_NK <- subset(CANDLE_celltype.cord.blood.IDOL, Cell_type == "NK")
+
+#Regression plot of estimated cell type proportions using different reference datasets.
+cord.blood.IDOL_NK_plot <- lm(Estimated_proportions_cord ~ Estimated_proportions_blood.450k, data = cord.blood.IDOL_NK)
+NK.cord.blood.IDOL_plot <- ggplotRegression(cord.blood.IDOL_NK_plot) + 
+  annotate('text', x = 0, y = 0.088, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(cord.blood.IDOL_NK_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.048, y = 0.088, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(cord.blood.IDOL_NK_plot$model$Estimated_proportions_blood.450k, cord.blood.IDOL_NK_plot$model$Estimated_proportions_cord), 4), "$"))) +
+  labs(x = "Cell Type Proportion (FlowSorted.Blood.450K)", y = "Cell Type Proportion (FlowSorted.CordBloodCombined.450K)", caption = "Cell Type: NK Cells, Method: IDOL") + 
+  scale_color_manual(values = "#009E73") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#Bcell:
+cord.blood.IDOL_Bcell <- subset(CANDLE_celltype.cord.blood.IDOL, Cell_type == "Bcell")
+
+#Regression plot of estimated cell type proportions using different reference datasets.
+cord.blood.IDOL_Bcell_plot <- lm(Estimated_proportions_cord ~ Estimated_proportions_blood.450k, data = cord.blood.IDOL_Bcell)
+Bcell.cord.blood.IDOL_plot <- ggplotRegression(cord.blood.IDOL_Bcell_plot) + 
+  annotate('text', x = 0, y = 0.2, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(cord.blood.IDOL_Bcell_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.055, y = 0.2, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(cord.blood.IDOL_Bcell_plot$model$Estimated_proportions_blood.450k, cord.blood.IDOL_Bcell_plot$model$Estimated_proportions_cord), 4), "$"))) +
+  labs(x = "Cell Type Proportion (FlowSorted.Blood.450K)", y = "Cell Type Proportion (FlowSorted.CordBloodCombined.450K)", caption = "Cell Type: B Cells, Method: IDOL") +
+  scale_color_manual(values = "#7F44AB") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#Mono:
+cord.blood.IDOL_Mono <- subset(CANDLE_celltype.cord.blood.IDOL, Cell_type == "Mono")
+
+#Regression plot of estimated cell type proportions using different reference datasets.
+cord.blood.IDOL_Mono_plot <- lm(Estimated_proportions_cord ~ Estimated_proportions_blood.450k, data = cord.blood.IDOL_Mono)
+Mono.cord.blood.IDOL_plot <- ggplotRegression(cord.blood.IDOL_Mono_plot) + 
+  annotate('text', x = 0, y = 0.18, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(cord.blood.IDOL_Mono_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.058, y = 0.18, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(cord.blood.IDOL_Mono_plot$model$Estimated_proportions_blood.450k, cord.blood.IDOL_Mono_plot$model$Estimated_proportions_cord), 4), "$"))) +
+  labs(x = "Cell Type Proportion (FlowSorted.Blood.450K)", y = "Cell Type Proportion (FlowSorted.CordBloodCombined.450K)", caption = "Cell Type: Monocytes, Method: IDOL") +
+  scale_color_manual(values = "#0072B2") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#Gran:
+cord.blood.IDOL_gran <- subset(CANDLE_celltype.cord.blood.IDOL, Cell_type == "Gran")
+
+#Regression plot of estimated cell type proportions using different reference datasets.
+cord.blood.IDOL_gran_plot <- lm(Estimated_proportions_cord ~ Estimated_proportions_blood.450k, data = cord.blood.IDOL_gran)
+gran.cord.blood.IDOL_plot <- ggplotRegression(cord.blood.IDOL_gran_plot) + 
+  annotate('text', x = 0.14, y = 0.75, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(cord.blood.IDOL_gran_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.29, y = 0.75, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(cord.blood.IDOL_gran_plot$model$Estimated_proportions_blood.450k, cord.blood.IDOL_gran_plot$model$Estimated_proportions_cord), 4), "$"))) +
+  labs(x = "Cell Type Proportion (FlowSorted.Blood.450K)", y = "Cell Type Proportion (FlowSorted.CordBloodCombined.450K)", caption = "Cell Type: Granulocytes, Method: IDOL") +
+  scale_color_manual(values = "#CC79A7") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#Combine plots.
+ggarrange(CD8T.cord.blood.IDOL_plot, CD4T.cord.blood.IDOL_plot, NK.cord.blood.IDOL_plot, Bcell.cord.blood.IDOL_plot, Mono.cord.blood.IDOL_plot, gran.cord.blood.IDOL_plot + rremove("x.text"), 
+          labels = c("A", "B", "C", "D", "E", "F"),
+          ncol = 3, nrow = 2)
+```
+
+
+
+Comparing between reference datasets that are built using **auto**:
+
+```{r}
+#Make the number of auto cell types the same and bind the auto data together.
+CANDLE_celltype.cord.auto_melt <- subset(CANDLE_celltype.cord.auto_melt, !Cell_type == "nRBC") #Blood ref dataset does not have nRBC cell type.
+CANDLE_celltype.cord.blood.auto <- cbind(CANDLE_celltype.cord.auto_melt, CANDLE_celltype.blood.450K.auto_melt)
+CANDLE_celltype.cord.blood.auto <- CANDLE_celltype.cord.blood.auto[, -c(3,4,6)]
+colnames(CANDLE_celltype.cord.blood.auto)[2] <- "Estimated_proportions_cord"
+colnames(CANDLE_celltype.cord.blood.auto)[3] <- "Estimated_proportions_blood.450k"
+```
+
+```{r, fig.align='center'}
+#Visualise individual regressions.
+#Create function to plot linear regression.
+ggplotRegression <- function (fit) {
+
+require(ggplot2)
+
+ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+  geom_point(aes(color = names(fit$model)[2]), show.legend = FALSE) +
+  stat_smooth(method = "lm", col = "red") 
+}
+
+
+#CD8T:
+cord.blood.auto_CD8T <- subset(CANDLE_celltype.cord.blood.auto, Cell_type == "CD8T")
+
+#Regression plot of estimated cell type proportions using different reference datasets.
+cord.blood.auto_CD8T_plot <- lm(Estimated_proportions_cord ~ Estimated_proportions_blood.450k, data = cord.blood.auto_CD8T)
+CD8T.cord.blood.auto_plot <- ggplotRegression(cord.blood.auto_CD8T_plot) + 
+  annotate('text', x = 0.05, y = 0.175, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(cord.blood.auto_CD8T_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.083, y = 0.175, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(cord.blood.auto_CD8T_plot$model$Estimated_proportions_blood.450k, cord.blood.auto_CD8T_plot$model$Estimated_proportions_cord), 4), "$"))) +
+  labs(x = "Cell Type Proportion (FlowSorted.Blood.450K)", y = "Cell Type Proportion (FlowSorted.CordBloodCombined.450K)", caption = "Cell Type: CD8+T Cells, Method: Auto") +
+  scale_color_manual(values = "#E69F00") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#CD4T:
+cord.blood.auto_CD4T <- subset(CANDLE_celltype.cord.blood.auto, Cell_type == "CD4T")
+
+#Regression plot of estimated cell type proportions using different reference datasets.
+cord.blood.auto_CD4T_plot <- lm(Estimated_proportions_cord ~ Estimated_proportions_blood.450k, data = cord.blood.auto_CD4T)
+CD4T.cord.blood.auto_plot <- ggplotRegression(cord.blood.auto_CD4T_plot) + 
+  annotate('text', x = 0, y = 0.27, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(cord.blood.auto_CD4T_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.074, y = 0.27, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(cord.blood.auto_CD4T_plot$model$Estimated_proportions_blood.450k, cord.blood.auto_CD4T_plot$model$Estimated_proportions_cord), 4), "$"))) +
+  labs(x = "Cell Type Proportion (FlowSorted.Blood.450K)", y = "Cell Type Proportion (FlowSorted.CordBloodCombined.450K)", caption = "Cell Type: CD4+T Cells, Method: Auto") +
+  scale_color_manual(values = "#56B4E9") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#NK:
+cord.blood.auto_NK <- subset(CANDLE_celltype.cord.blood.auto, Cell_type == "NK")
+
+#Regression plot of estimated cell type proportions using different reference datasets.
+cord.blood.auto_NK_plot <- lm(Estimated_proportions_cord ~ Estimated_proportions_blood.450k, data = cord.blood.auto_NK)
+NK.cord.blood.auto_plot <- ggplotRegression(cord.blood.auto_NK_plot) + 
+  annotate('text', x = 0, y = 0.14, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(cord.blood.auto_NK_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.025, y = 0.14, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(cord.blood.auto_NK_plot$model$Estimated_proportions_blood.450k, cord.blood.auto_NK_plot$model$Estimated_proportions_cord), 4), "$"))) +
+  labs(x = "Cell Type Proportion (FlowSorted.Blood.450K)", y = "Cell Type Proportion (FlowSorted.CordBloodCombined.450K)", caption = "Cell Type: NK Cells, Method: Auto") + 
+  scale_color_manual(values = "#009E73") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#Bcell:
+cord.blood.auto_Bcell <- subset(CANDLE_celltype.cord.blood.auto, Cell_type == "Bcell")
+
+#Regression plot of estimated cell type proportions using different reference datasets.
+cord.blood.auto_Bcell_plot <- lm(Estimated_proportions_cord ~ Estimated_proportions_blood.450k, data = cord.blood.auto_Bcell)
+Bcell.cord.blood.auto_plot <- ggplotRegression(cord.blood.auto_Bcell_plot) + 
+  annotate('text', x = 0.03, y = 0.2, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(cord.blood.auto_Bcell_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.088, y = 0.2, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(cord.blood.auto_Bcell_plot$model$Estimated_proportions_blood.450k, cord.blood.auto_Bcell_plot$model$Estimated_proportions_cord), 4), "$"))) +
+  labs(x = "Cell Type Proportion (FlowSorted.Blood.450K)", y = "Cell Type Proportion (FlowSorted.CordBloodCombined.450K)", caption = "Cell Type: B Cells, Method: Auto") +
+  scale_color_manual(values = "#7F44AB") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#Mono:
+cord.blood.auto_Mono <- subset(CANDLE_celltype.cord.blood.auto, Cell_type == "Mono")
+
+#Regression plot of estimated cell type proportions using different reference datasets.
+cord.blood.auto_Mono_plot <- lm(Estimated_proportions_cord ~ Estimated_proportions_blood.450k, data = cord.blood.auto_Mono)
+Mono.cord.blood.auto_plot <- ggplotRegression(cord.blood.auto_Mono_plot) + 
+  annotate('text', x = 0, y = 0.17, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(cord.blood.auto_Mono_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.054, y = 0.17, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(cord.blood.auto_Mono_plot$model$Estimated_proportions_blood.450k, cord.blood.auto_Mono_plot$model$Estimated_proportions_cord), 4), "$"))) +
+  labs(x = "Cell Type Proportion (FlowSorted.Blood.450K)", y = "Cell Type Proportion (FlowSorted.CordBloodCombined.450K)", caption = "Cell Type: Monocytes, Method: Auto") +
+  scale_color_manual(values = "#0072B2") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#Gran:
+cord.blood.auto_gran <- subset(CANDLE_celltype.cord.blood.auto, Cell_type == "Gran")
+
+#Regression plot of estimated cell type proportions using different reference datasets.
+cord.blood.auto_gran_plot <- lm(Estimated_proportions_cord ~ Estimated_proportions_blood.450k, data = cord.blood.auto_gran)
+gran.cord.blood.auto_plot <- ggplotRegression(cord.blood.auto_gran_plot) + 
+  annotate('text', x = 0.155, y = 0.65, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(cord.blood.auto_gran_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.30, y = 0.65, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(cord.blood.auto_gran_plot$model$Estimated_proportions_blood.450k, cord.blood.auto_gran_plot$model$Estimated_proportions_cord), 4), "$"))) +
+  labs(x = "Cell Type Proportion (FlowSorted.Blood.450K)", y = "Cell Type Proportion (FlowSorted.CordBloodCombined.450K)", caption = "Cell Type: Granulocytes, Method: Auto") +
+  scale_color_manual(values = "#CC79A7") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#Combine plots.
+ggarrange(CD8T.cord.blood.auto_plot, CD4T.cord.blood.auto_plot, NK.cord.blood.auto_plot, Bcell.cord.blood.auto_plot, Mono.cord.blood.auto_plot, gran.cord.blood.auto_plot + rremove("x.text"), 
+          labels = c("A", "B", "C", "D", "E", "F"),
+          ncol = 3, nrow = 2)
+```
+
+
+----------------------------------------------------------------------------------------------------------------------------
+
+
+##Cell Type Deconvolution using Full CANDLE Cord Dataset
+
+
+###Step 1: Load full CANDLE cord dataset and preprocessnoob.
+
+```{r}
+#Read RGSet from Chaini's CANDLE folder.
+CORD <- readRDS("~/KoborLab/kobor_space/ckonwar/CANDLE/CORD.rds")
+dim(CORD) #582 samples.
+
+#PreprocessNoob.
+CORD.noob <- preprocessNoob(CORD)
+```
+
+
+###Step 2: Load CANDLE cord samples and remove NA.
+
+```{r}
+#Get betas for raw data.
+CORD_betas <- getBeta(CORD)
+sum(is.na(CORD_betas)) #13691 NAs - needs to be 0.
+CORD_betas <- na.omit(CORD_betas) #Remove NAs from beta matrix.
+sum(is.na(CORD_betas)) #Should be 0.
+
+#Get betas for noob-normalised data.
+CORD.noob_betas <- getBeta(CORD.noob)
+sum(is.na(CORD.noob_betas)) #0 NA - don't need to remove.
+
+#Load the latest cell type predictor for cord blood.
+source("~/KoborLab/kobor_space/shared_coding_resource/ECC9.R")
+```
+
+
+###Step 3: Run cord predictor.
+
+Using FlowSorted.CordBloodCombined.450K reference dataset:
+
+- The code below attempts to predict the cell type composition of 100 randomly chosen CANDLE samples using both IDOL and auto methods to identify the L-DMR (leukocyte differentially methylated regions) library - which is a set of cell-type specific DNAm candidate markers that are optimised to accurately estimate cell types. The methods differ in their interrogation of probes to identify cell type differences. 
+
+- Automatic method: Picks the top 50 hyper- and hypo-methylated probes for each cell type based on t-statistic ranking (600 probes in total).
+
+- IDOL method: Iteratively identifies 450 probes that optimise prediction performance across six leucocyte subtypes. 
+
+From [FlowSorted.CordBloodCombined.450K reference dataset](https://clinicalepigeneticsjournal.biomedcentral.com/articles/10.1186/s13148-019-0717-y) publication, it is recommended that cell type prediction to be run using IDOL method (which was tested above and shown to be the more accurate method), so I will be applying the IDOL method on both raw and noob-processed CANDLE dataset. 
+
+```{r}
+#Load IDOL optimised CpGs for cord blood.
+data("IDOLOptimizedCpGsCordBlood")
+
+#Raw CANDLE cord dataset using IDOL method.
+
+#Run predictor. Input: Dataset betas. Select tissueType according to tissue type of dataset. arrayType is only needed if tissueType is "blood".
+CORD_raw_celltype <- ECC9(CORD_betas, tissueType = "cord", arrayType = "EPIC", probelist = "IDOL", verbose = TRUE)
+CORD_raw_celltype.counts <- as.data.frame(CORD_raw_celltype$counts)
+
+#Melt data for plotting. 
+CORD_raw_celltype.melt <- gather(CORD_raw_celltype.counts)
+colnames(CORD_raw_celltype.melt)[1] <- "Cell_type"
+colnames(CORD_raw_celltype.melt)[2] <- "Estimated_proportions"
+
+
+#Noob-corrected CANDLE cord dataset using IDOL method. 
+
+#Run predictor. Input: Dataset betas. Select tissueType according to tissue type of dataset. arrayType is only needed if tissueType is "blood".
+CORD_noob_celltype <- ECC9(CORD.noob_betas, tissueType = "cord", arrayType = "EPIC", probelist = "IDOL", verbose = TRUE)
+CORD_noob_celltype.counts <- as.data.frame(CORD_noob_celltype$counts)
+
+#Melt data for plotting. 
+CORD_noob_celltype.melt <- gather(CORD_noob_celltype.counts)
+colnames(CORD_noob_celltype.melt)[1] <- "Cell_type"
+colnames(CORD_noob_celltype.melt)[2] <- "Estimated_proportions"
+```
+
+```{r, eval=FALSE}
+save(CORD_raw_celltype, file = "~/KoborLab/kobor_space/kendrix/Cell_Type_Prediction/CORD_raw_celltype.RData")
+save(CORD_noob_celltype, file = "~/KoborLab/kobor_space/kendrix/Cell_Type_Prediction/CORD_noob_celltype.RData")
+```
+
+```{r, fig.align='center'}
+CORD_raw_celltype.melt$Normalisation <- "Raw"
+CORD_noob_celltype.melt$Normalisation <- "Noob"
+
+CANDLE_celltype.cord_melt <- rbind(CORD_raw_celltype.melt, CORD_noob_celltype.melt)
+
+ggplot(CANDLE_celltype.cord_melt, aes(factor(Cell_type), Estimated_proportions)) + 
+  geom_boxplot(aes(fill = Normalisation), outlier.shape = NA) + 
+  geom_jitter(aes(fill = Normalisation), size = 2, shape = 21, alpha = 0.7, 
+              position = position_jitterdodge(dodge.width = 0.7, jitter.width = 0.1)) + 
+  labs(x = "Cell Type", y = "Estimated Proportions", fill = "Normalisation",
+       caption = "Estimated cell type proportion of CANDLE cord blood using IDOL (Reference dataset: FlowSorted.CordBloodCombined.450K)") +
+  scale_fill_manual(values = c("#994C00", "#FFCCCC")) +
+  theme_classic() + theme(plot.caption = element_text(hjust = 0.5, size = 12))
+```
+
+
+###Step 4: Cell type prediction for raw dataset.
+
+```{r}
+ggplot(CORD_raw_celltype.melt, aes(factor(Cell_type), Estimated_proportions)) + 
+  geom_boxplot(aes(fill = Cell_type), outlier.shape = NA) + 
+  geom_jitter(aes(fill = Cell_type), size = 2, shape = 21, alpha = 0.7, 
+              position = position_jitterdodge(dodge.width = 0.75, jitter.width = 0.25)) + 
+  labs(x = "Cell Type", y = "Estimated Proportions", fill = "Normalisation", caption = "Estimated cell type proportion of CANDLE cord blood using IDOL (Reference dataset: FlowSorted.CordBloodCombined.450K)") +
+  scale_fill_manual(values = c("#7F44AB", "#56B4E9", "#E69F00", "#CC79A7", "#0072B2", "#009E73", "#D55E00")) +
+  theme_classic() + theme(plot.caption = element_text(hjust = 0.5, size = 12), legend.position = "none")
+```
+
+
+###Step 5: Cell type prediction for noob-normalised dataset.
+
+```{r}
+ggplot(CORD_noob_celltype.melt, aes(factor(Cell_type), Estimated_proportions)) + 
+  geom_boxplot(aes(fill = Cell_type), outlier.shape = NA) + 
+  geom_jitter(aes(fill = Cell_type), size = 2, shape = 21, alpha = 0.7, 
+              position = position_jitterdodge(dodge.width = 0.75, jitter.width = 0.25)) + 
+  labs(x = "Cell Type", y = "Estimated Proportions", fill = "Normalisation", caption = "Estimated cell type proportion of CANDLE cord blood using IDOL (Reference dataset: FlowSorted.CordBloodCombined.450K)") +
+  scale_fill_manual(values = c("#7F44AB", "#56B4E9", "#E69F00", "#CC79A7", "#0072B2", "#009E73", "#D55E00")) +
+  theme_classic() + theme(plot.caption = element_text(hjust = 0.5, size = 12), legend.position = "none")
+```
+
+
+###Step 6: Compare cell type prediction for each cell type. 
+
+```{r, fig.align='center'}
+CANDLE_celltype.cord <- cbind(CORD_raw_celltype.melt, CORD_noob_celltype.melt)
+CANDLE_celltype.cord <- CANDLE_celltype.cord[, -c(3,4,6)]
+colnames(CANDLE_celltype.cord)[2] <- "Estimated_proportions_Raw"
+colnames(CANDLE_celltype.cord)[3] <- "Estimated_proportions_Noob"
+
+
+#Visualise individual regressions.
+#Create function to plot linear regression.
+ggplotRegression <- function (fit) {
+
+require(ggplot2)
+
+ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+  geom_point(aes(color = names(fit$model)[2]), show.legend = FALSE) +
+  stat_smooth(method = "lm", col = "red")
+}
+
+
+#CD8T:
+celltype_CD8T <- subset(CANDLE_celltype.cord, Cell_type == "CD8T")
+
+#Regression plot of estimated cell type proportions using IDOL and Auto methods.
+celltype_CD8T_plot <- lm(Estimated_proportions_Raw ~ Estimated_proportions_Noob, data = celltype_CD8T)
+CD8T_plot <- ggplotRegression(celltype_CD8T_plot) + 
+  annotate('text', x = 0, y = 0.16, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(celltype_CD8T_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.034, y = 0.16, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(celltype_CD8T_plot$model$Estimated_proportions_Noob, celltype_CD8T_plot$model$Estimated_proportions_Raw), 4), "$"))) +
+  labs(x = "Cell Type Proportion (Noob-Normalised)", y = "Cell Type Proportion (Raw)", caption = "Cell Type: CD8+T Cells") + 
+  scale_color_manual(values = "#E69F00") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#CD4T:
+celltype_CD4T <- subset(CANDLE_celltype.cord, Cell_type == "CD4T")
+
+#Regression plot of estimated cell type proportions using IDOL and Auto methods.
+celltype_CD4T_plot <- lm(Estimated_proportions_Raw ~ Estimated_proportions_Noob, data = celltype_CD4T)
+CD4T_plot <- ggplotRegression(celltype_CD4T_plot) + 
+  annotate('text', x = 0, y = 0.38, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(celltype_CD4T_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.12, y = 0.38, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(celltype_CD4T_plot$model$Estimated_proportions_Noob, celltype_CD4T_plot$model$Estimated_proportions_Raw), 4), "$"))) +
+  labs(x = "Cell Type Proportion (Noob-Normalised)", y = "Cell Type Proportion (Raw)", caption = "Cell Type: CD4+T Cells") +
+  scale_color_manual(values = "#56B4E9") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#NK:
+celltype_NK <- subset(CANDLE_celltype.cord, Cell_type == "NK")
+
+#Regression plot of estimated cell type proportions using IDOL and Auto methods.
+celltype_NK_plot <- lm(Estimated_proportions_Raw ~ Estimated_proportions_Noob, data = celltype_NK)
+NK_plot <- ggplotRegression(celltype_NK_plot) + 
+  annotate('text', x = 0, y = 0.155, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(celltype_NK_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.038, y = 0.155, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(celltype_NK_plot$model$Estimated_proportions_Noob, celltype_NK_plot$model$Estimated_proportions_Raw), 4), "$"))) +
+  labs(x = "Cell Type Proportion (Noob-Normalised)", y = "Cell Type Proportion (Raw)", caption = "Cell Type: NK Cells") + 
+  scale_color_manual(values = "#009E73") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#Bcell:
+celltype_Bcell <- subset(CANDLE_celltype.cord, Cell_type == "Bcell")
+
+#Regression plot of estimated cell type proportions using IDOL and Auto methods.
+celltype_Bcell_plot <- lm(Estimated_proportions_Raw ~ Estimated_proportions_Noob, data = celltype_Bcell)
+Bcell_plot <- ggplotRegression(celltype_Bcell_plot) + 
+  annotate('text', x = 0, y = 0.26, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(celltype_Bcell_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.07, y = 0.26, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(celltype_Bcell_plot$model$Estimated_proportions_Noob, celltype_Bcell_plot$model$Estimated_proportions_Raw), 4), "$"))) +
+  labs(x = "Cell Type Proportion (Noob-Normalised)", y = "Cell Type Proportion (Raw)", caption = "Cell Type: B Cells") +
+  scale_color_manual(values = "#7F44AB") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#Mono:
+celltype_Mono <- subset(CANDLE_celltype.cord, Cell_type == "Mono")
+
+#Regression plot of estimated cell type proportions using IDOL and Auto methods.
+celltype_Mono_plot <- lm(Estimated_proportions_Raw ~ Estimated_proportions_Noob, data = celltype_Mono)
+Mono_plot <- ggplotRegression(celltype_Mono_plot) + 
+  annotate('text', x = 0, y = 0.22, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(celltype_Mono_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.06, y = 0.22, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(celltype_Mono_plot$model$Estimated_proportions_Noob, celltype_Mono_plot$model$Estimated_proportions_Raw), 4), "$"))) +
+  labs(x = "Cell Type Proportion (Noob-Normalised)", y = "Cell Type Proportion (Raw)", caption = "Cell Type: Monocytes") +
+  scale_color_manual(values = "#0072B2") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#nRBC:
+celltype_nRBC <- subset(CANDLE_celltype.cord, Cell_type == "nRBC")
+
+#Regression plot of estimated cell type proportions using IDOL and Auto methods.
+celltype_nRBC_plot <- lm(Estimated_proportions_Raw ~ Estimated_proportions_Noob, data = celltype_nRBC)
+nRBC_plot <- ggplotRegression(celltype_nRBC_plot) + 
+  annotate('text', x = 0, y = 0.38, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(celltype_nRBC_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.12, y = 0.38, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(celltype_nRBC_plot$model$Estimated_proportions_Noob, celltype_nRBC_plot$model$Estimated_proportions_Raw), 4), "$"))) +
+  labs(x = "Cell Type Proportion (Noob-Normalised)", y = "Cell Type Proportion (Raw)", caption = "Cell Type: Nucleated RBCs") +
+  scale_color_manual(values = "#D55E00") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#Gran:
+celltype_gran <- subset(CANDLE_celltype.cord, Cell_type == "Gran")
+
+#Regression plot of estimated cell type proportions using IDOL and Auto methods.
+celltype_gran_plot <- lm(Estimated_proportions_Raw ~ Estimated_proportions_Noob, data = celltype_gran)
+gran_plot <- ggplotRegression(celltype_gran_plot) + 
+  annotate('text', x = 0, y = 0.62, hjust = 0, vjust = 0, size = 4, 
+           label = TeX(paste("$\\mathit{R^2} =", signif(summary(celltype_gran_plot)$adj.r.squared, 4), "$"))) +
+  annotate('text', x = 0.2, y = 0.62, hjust = 0, vjust = 0, size = 4,
+           label = TeX(paste(", RMSE =", signif(rmse(celltype_gran_plot$model$Estimated_proportions_Noob, celltype_gran_plot$model$Estimated_proportions_Raw), 4), "$"))) +
+  labs(x = "Cell Type Proportion (Noob-Normalised)", y = "Cell Type Proportion (Raw)", caption = "Cell Type: Granulocytes") + 
+  scale_color_manual(values = "#CC79A7") + stat_cor(method = "spearman") +
+  theme_bw() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"), 
+                     axis.text = element_text(), 
+                     axis.title = element_text(size = 8), 
+                     plot.caption = element_text(hjust = 0.5, size = rel(1)))
+
+
+#Combine plots.
+ggarrange(CD8T_plot, CD4T_plot, NK_plot, Bcell_plot, Mono_plot, gran_plot, nRBC_plot + rremove("x.text"), 
+          labels = c("A", "B", "C", "D", "E", "F", "G"),
+          ncol = 3, nrow = 3)
+```
+
+
+###Step 7: Cell type correlation. 
+
+```{r, fig.align='center'}
+#Plot the variables against each other. (Code from Chaini Konwar)
+grey <- colorRampPalette(brewer.pal(n = 9, "BrBG"))
+heatmap.2(cor(CORD_noob_celltype.counts, use = "pairwise.complete.obs", method = "spearman"), cexCol = 1.5, cexRow = 1.5, col = grey, dendrogram = "both", scale = "none", margin = c(8,8), trace = "none", key = TRUE, keysize = 2, cellnote = signif(cor(CORD_noob_celltype.counts), 2), notecex = 2, notecol = "black") 
+```
+
+
+
+
